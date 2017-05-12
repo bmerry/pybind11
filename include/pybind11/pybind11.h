@@ -54,16 +54,11 @@ public:
     }
 
     /// Construct a cpp_function from a lambda function (possibly with internal state)
-    template <typename Func, typename... Extra, typename = detail::enable_if_t<
-        detail::satisfies_none_of<
-            typename std::remove_reference<Func>::type,
-            std::is_function, std::is_pointer, std::is_member_pointer
-        >::value>
-    >
+    template <typename Func, typename... Extra,
+              typename = detail::enable_if_t<detail::is_lambda<Func>::value>>
     cpp_function(Func &&f, const Extra&... extra) {
-        using FuncType = typename detail::remove_class<decltype(&std::remove_reference<Func>::type::operator())>::type;
         initialize(std::forward<Func>(f),
-                   (FuncType *) nullptr, extra...);
+                   (detail::function_signature_t<Func> *) nullptr, extra...);
     }
 
     /// Construct a cpp_function from a class method (non-const)
@@ -93,7 +88,7 @@ protected:
     template <typename Func, typename Return, typename... Args, typename... Extra>
     void initialize(Func &&f, Return (*)(Args...), const Extra&... extra) {
 
-        struct capture { typename std::remove_reference<Func>::type f; };
+        struct capture { detail::remove_reference_t<Func> f; };
 
         /* Store the function including any extra state it might have (e.g. a lambda capture object) */
         auto rec = make_function_record();
@@ -701,7 +696,7 @@ protected:
             PyErr_SetString(PyExc_TypeError, msg.c_str());
             return nullptr;
         } else {
-            if (overloads->is_constructor) {
+            if (overloads->is_constructor && !((instance_essentials<void> *) parent.ptr())->holder_constructed) {
                 /* When a constructor ran successfully, the corresponding
                    holder type (e.g. std::unique_ptr) must still be initialized. */
                 auto tinfo = get_type_info(Py_TYPE(parent.ptr()));
@@ -915,6 +910,9 @@ public:
     static_assert(detail::all_of<is_valid_class_option<options>...>::value,
             "Unknown/invalid class_ template parameters provided");
 
+    static_assert(!has_alias || std::is_polymorphic<type>::value,
+            "Cannot use an alias class with a non-polymorphic type");
+
     PYBIND11_OBJECT(class_, generic_type, PyType_Check)
 
     template <typename... Extra>
@@ -1007,6 +1005,10 @@ public:
         init.execute(*this, extra...);
         return *this;
     }
+
+    // Implementation in pybind11/factory.h (which isn't included by default!)
+    template <typename... Args, typename... Extra>
+    class_ &def(detail::init_factory<Args...> &&init, const Extra&... extra);
 
     template <typename Func> class_& def_buffer(Func &&func) {
         struct capture { Func func; };
@@ -1155,6 +1157,8 @@ private:
         auto inst = (instance_type *) inst_;
         init_holder_helper(inst, (const holder_type *) holder_ptr, inst->value);
     }
+
+    template <typename, typename, typename, typename, typename...> friend struct detail::init_factory;
 
     static void dealloc(PyObject *inst_) {
         instance_type *inst = (instance_type *) inst_;
@@ -1336,6 +1340,7 @@ NAMESPACE_END(detail)
 
 template <typename... Args> detail::init<Args...> init() { return detail::init<Args...>(); }
 template <typename... Args> detail::init_alias<Args...> init_alias() { return detail::init_alias<Args...>(); }
+// init(func) and init(func, func) factory constructors are in factory.h
 
 /// Makes a python iterator from a first and past-the-end C++ InputIterator.
 template <return_value_policy Policy = return_value_policy::reference_internal,
